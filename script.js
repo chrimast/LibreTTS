@@ -9,7 +9,7 @@ const API_CONFIG = {
         url: '/api/tts'
     },
     'oai-tts': {
-        url: 'https://oai-tts-proxy.zwei.de.eu.org/v1/audio/speech'
+        url: 'https://oai-tts.zwei.de.eu.org/v1/audio/speech'
     }
 };
 
@@ -197,7 +197,7 @@ async function fetchCustomSpeakers(apiId) {
         } else {
             // 如果响应格式不匹配预期
             console.warn('API返回格式不是标准OpenAI格式:', data);
-            return { 'default': '自定义讲述者' };
+            return { 'default': '自定义讲述人' };
         }
     } catch (error) {
         console.error('获取自定义讲述者失败:', error);
@@ -420,10 +420,17 @@ $(document).ready(function() {
         const format = $('#apiFormat').val();
         const manual = $('#manualSpeakers').val().split(',').map(s=>s.trim()).filter(Boolean);
         const maxLen = parseInt($('#maxLength').val()) || null;
+        const enableSegmentation = $('#enableSegmentation').prop('checked');
         const id = editingApiId || ('custom-' + Date.now());
-        customAPIs[id] = { name, endpoint, apiKey:key, modelEndpoint, format, manual, maxLength: maxLen };
+        customAPIs[id] = { 
+            name, endpoint, apiKey:key, modelEndpoint, format, manual, 
+            maxLength: maxLen, enableSegmentation 
+        };
         localStorage.setItem('customAPIs', JSON.stringify(customAPIs));
-        API_CONFIG[id] = { url:endpoint, isCustom:true, apiKey:key, format, manual, maxLength: maxLen };
+        API_CONFIG[id] = { 
+            url:endpoint, isCustom:true, apiKey:key, format, manual, 
+            maxLength: maxLen, enableSegmentation 
+        };
         updateApiOptions();
         refreshSavedApisList();
         $('#customApiForm')[0].reset();
@@ -750,17 +757,24 @@ function refreshSavedApisList() {
 
 // 更新字符计数提示文本
 function updateCharCountText() {
-    const currentLength = $('#text').val().length;
+    const currentLength = getTextLength($('#text').val());
     const apiName = $('#api').val();
-    const customApi = customAPIs[apiName];
+    const { maxTotal } = getApiLimits(apiName);
+    const percentage = Math.round((currentLength / maxTotal) * 100);
     
-    if (customApi) {
-        const maxLength = customApi.maxLength || 100000;
-        $('#charCount').text(`最多${maxLength}字符，目前已输入${currentLength}字符。`);
-    } else if (apiName === 'oai-tts' || customAPIs[apiName]) {
-        $('#charCount').text(`最多100个中文字符或约150个英文字符，目前已输入${currentLength}个字符`);
-    } else {
-        $('#charCount').text(`最多100000个字符，目前已输入${currentLength}个字符；长文本将智能分段生成语音。`);
+    $('#charCount').text(`${percentage}% (${currentLength}/${maxTotal}单位)`);
+    $('#text').attr('maxlength', maxTotal);
+    
+    // 如果超过100%，阻止继续输入
+    if (currentLength > maxTotal) {
+        const textarea = $('#text')[0];
+        let text = textarea.value;
+        // 截断文本直到符合长度限制
+        while (getTextLength(text) > maxTotal && text.length > 0) {
+            text = text.slice(0, -1);
+        }
+        textarea.value = text;
+        $('#charCount').text(`100% (${getTextLength(text)}/${maxTotal}单位)`);
     }
 }
 
@@ -895,14 +909,20 @@ async function makeRequest(url, isPreview, text, requestInfo = '', speakerId = n
         if (apiFormat === 'openai') {
             text = text.replace(/<break\s+time=["'](\d+(?:\.\d+)?[ms]s?)["']\s*\/>/g, '');
             
-            // 对OAI格式API添加文本长度验证
-            const chineseChars = text.match(/[\u4e00-\u9fa5]/g) || [];
-            const otherChars = text.length - chineseChars.length;
-            const effectiveLength = chineseChars.length + otherChars / 1.5;
-            const maxLength = customApi?.maxLength || 100;
+            // 对OAI格式API添加文本长度验证 - 修改长度限制逻辑
+            const textLength = getTextLength(text);
+            const maxSegmentLength = customApi?.maxLength || 1000;
+            const maxTotalLength = customApi?.maxLength ? customApi.maxLength * 5 : 5000;
             
-            if (effectiveLength > maxLength) {
-                throw new Error(`OpenAI格式API文本长度超限，最多支持${maxLength}个中文字符或约${Math.round(maxLength * 1.5)}个英文字符，当前等效长度: ${Math.round(effectiveLength)}`);
+            // 检查总长度限制
+            if (textLength > maxTotalLength) {
+                throw new Error(`OpenAI格式API文本总长度超限，最多支持${maxTotalLength}个单位，当前长度: ${textLength}`);
+            }
+            
+            // 检查单段长度限制（用于非预览请求）
+            if (!isPreview && textLength > maxSegmentLength) {
+                // 这里不抛错，让分段逻辑处理
+                console.log(`文本将被分段处理，单段限制: ${maxSegmentLength}个单位`);
             }
         } else {
             // 转义文本中的特殊字符，但保护 SSML 标签
@@ -1213,18 +1233,23 @@ function getTextLength(str) {
     return textLength + pauseLength;
 }
 
-function splitText(text, maxLength = 5000) {
-    // 如果是OAI-TTS，使用更小的分段大小
-    const apiName = $('#api').val();
-    if (apiName === 'oai-tts') {
-        // 对于OAI-TTS，限制为100个中文字符
-        maxLength = 100;
+// 返回每个API的最大段长和总长
+function getApiLimits(apiName) {
+    // returns { maxSegment, maxTotal } for each API
+    if (apiName === 'oai-tts' || (customAPIs[apiName] && customAPIs[apiName].format === 'openai')) {
+        return { maxSegment: 400, maxTotal: 2000 };
+    } else {
+        return { maxSegment: 5000, maxTotal: 100000 };
     }
-    
+}
+
+function splitText(text) {
+    const apiName = $('#api').val();
+    const { maxSegment } = getApiLimits(apiName);
     const segments = [];
     let remainingText = text.trim();
 
-    const punctuationGroups = [
+     const punctuationGroups = [
         // 第一优先级: 换行符
         ['\n', '\r\n'],  
         
@@ -1234,8 +1259,8 @@ function splitText(text, maxLength = 5000) {
             '.', '!', '?',            // 英文
             '。', '！', '？',           // 日文
             '︒', '︕', '︖',           // 全角
-            '｡', '!', '?',            // 半角
-            '।', '॥',                 // 梵文
+            '｡', '!', '?',            // 半角/阿拉伯文
+            '。', '॥',                 // 梵文
             '؟', '۔',                 // 阿拉伯文
             '។', '៕',                 // 高棉文
             '။', '၏',                 // 缅甸文
@@ -1260,10 +1285,10 @@ function splitText(text, maxLength = 5000) {
             ',', ':',                // 英文
             '、', '，', '：',         // 日文
             '︑', '︓',              // 全角
-            '､', ':', '،',          // 半角/阿拉伯文
+            '､', ':', '、',          // 半角/阿拉伯文
             '፣', '፥',               // 埃塞俄比亚文
             '၊', '၌',               // 缅甸文
-            '،', '؍',               // 波斯文
+            '、', '؍',               // 波斯文
             '׀', '，'                // 希伯来文
         ],
         
@@ -1273,10 +1298,7 @@ function splitText(text, maxLength = 5000) {
             '-', '—', '–',           // 英文破折号
             '‥', '〳', '〴', '〵',   // 日文重复符号
             '᠁', '᠂', '᠃',          // 蒙古文
-            '᭛', '᭜', '᭝',          // 巴厘文
-            '᱾', '᱿',               // 雷布查文
-            '⁂', '※',               // 特殊符号
-            '〽', '〜'                // 其他变音符号
+            '᭛', '᭜', '᭝'          // 巴厘文
         ],
         
         // 第六优先级: 空格和其他分隔符
@@ -1299,7 +1321,7 @@ function splitText(text, maxLength = 5000) {
         for (let i = 0; i < remainingText.length; i++) {
             currentLength += remainingText.charCodeAt(i) > 127 ? 2 : 1;
             
-            if (currentLength > maxLength) {
+            if (currentLength > maxSegment) {
                 splitIndex = i;
                 // 先遍历优先级组
                 for (let priority = 0; priority < punctuationGroups.length; priority++) {
@@ -1309,7 +1331,7 @@ function splitText(text, maxLength = 5000) {
                         searchLength += remainingText.charCodeAt(j) > 127 ? 2 : 1;
                         
                         if (punctuationGroups[priority].includes(remainingText[j])) {
-                            // 找到当前优先级的标点，记录位置并停止搜索
+                            // 找到当前优先级的分段点，记录位置并停止搜索
                             bestPriorityFound = priority;
                             bestSplitIndex = j;
                             break;
@@ -1490,8 +1512,8 @@ function showInfo(message) {
 // 根据选择的API格式更新表单占位符
 function updateApiFormPlaceholders(format) {
     if (format === 'openai') {
-        $('#apiEndpoint').attr('placeholder', 'https://api.example.com/v1/audio/speech');
-        $('#modelEndpoint').attr('placeholder', 'https://api.example.com/v1/models');
+        $('#apiEndpoint').attr('placeholder', 'https://api.openai.com/v1/audio/speech');
+        $('#modelEndpoint').attr('placeholder', 'https://api.openai.com/v1/models');
         $('#apiKey').attr('placeholder', 'sk-...');
         $('#manualSpeakers').attr('placeholder', 'tts-1,tts-1-hd,alloy,echo,fable,onyx,nova,shimmer');
     } else if (format === 'edge') {
@@ -1499,6 +1521,21 @@ function updateApiFormPlaceholders(format) {
         $('#modelEndpoint').attr('placeholder', 'https://api.example.com/api/voices');
         $('#apiKey').attr('placeholder', 'x-api-key: ...');
         $('#manualSpeakers').attr('placeholder', 'zh-CN-XiaoxiaoNeural,en-US-AriaNeural,...');
+    }
+
+    // Set default values only when creating a new API (editingApiId is null)
+    if (editingApiId === null) {
+        if (format === 'openai') {
+            $('#apiEndpoint').val('https://api.openai.com/v1/audio/speech');
+            $('#modelEndpoint').val('https://api.openai.com/v1/models');
+        } else {
+            // For Edge or other formats, clear these fields or set to a generic example if desired
+            // For now, clearing them is consistent with form.reset() behavior for other fields
+            $('#apiEndpoint').val('');
+            $('#modelEndpoint').val('');
+        }
+        // Other fields like apiName, apiKey, manualSpeakers, maxLength are reset by form.reset()
+        // or explicitly cleared when the modal is opened for a new API.
     }
 }
 
