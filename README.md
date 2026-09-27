@@ -2,7 +2,7 @@
 
 LibreTTS 是一款免费的在线文本转语音工具，支持多种声音选择，可调节语速和语调，提供即时试听和下载功能。
 
-> 本项目曾用名 Ciallo TTS。
+> 本项目曾用名 Ciallo TTS。基于 [Next.js](https://nextjs.org)（App Router）+ TypeScript + Tailwind CSS 构建。
 
 ## 功能特点
 
@@ -10,10 +10,42 @@ LibreTTS 是一款免费的在线文本转语音工具，支持多种声音选�
 - 🔊 实时预览和试听功能
 - ⚡ 支持长文本自动分段处理
 - 🎛️ 可调节语速和语调
+- 🔍 语音搜索下拉框（按名称或 ID 过滤）
 - 📱 响应式设计，支持移动端
 - 💾 支持音频下载
 - 📝 历史记录功能（最多保存50条）
-- 🔌 支持添加自定义OpenAI格式的TTS API
+- 🔌 支持添加自定义 TTS API（OpenAI / Edge 两种格式，可导入导出配置）
+- 🔐 可选访问密码保护（设置 `PASSWORD` 环境变量）
+
+## 本地开发
+
+要求 Node.js 20 或更高版本。
+
+```bash
+npm install
+npm run dev        # 开发模式，默认 http://localhost:3000
+```
+
+```bash
+npm run build      # 生产构建
+npm start          # 运行生产版本
+```
+
+### 项目结构
+
+```
+├── src/
+│   ├── app/                  # Next.js App Router
+│   │   ├── api/              # Route Handlers：tts / voices / check-password / verify-password
+│   │   ├── layout.tsx        # SEO metadata、JSON-LD、统计脚本
+│   │   └── page.tsx
+│   ├── components/           # React 组件（表单、历史记录、API管理弹窗、搜索下拉框等）
+│   ├── lib/                  # 核心逻辑（Edge TTS 签名、文本分段、请求构造、自定义API存储）
+│   └── hooks/                # React hooks
+├── public/                   # 静态资源（speakers.json、图标）
+├── Dockerfile                # 多阶段构建（standalone 输出）
+└── .github/workflows/        # Docker 镜像自动发布到 GHCR
+```
 
 ## API 说明
 
@@ -25,12 +57,12 @@ LibreTTS 是一款免费的在线文本转语音工具，支持多种声音选�
   - 支持 GET/POST 方法
   - GET 示例: `/api/tts?t=你好世界&v=zh-CN-XiaoxiaoNeural&r=0&p=0`
   - POST 示例: 请求体为JSON格式 `{"text": "你好世界", "voice": "zh-CN-XiaoxiaoNeural", "rate": 0, "pitch": 0}`
+  - `format` 参数可指定音频格式（默认 `audio-24khz-48kbitrate-mono-mp3`）
 
 - `/api/voices` - 获取可用语音列表 API
   - 仅支持 GET 方法
   - 示例: `/api/voices?l=zh&f=1` (l参数用于筛选语言，f参数指定返回格式)
-
-例如：`https://libretts.is-an.org/api/tts`
+  - `f=0`: MultiTTS YAML 格式；`f=1`: `{ShortName: LocalName}` 映射；缺省: 原始 JSON 数组
 
 ### 自定义 API
 
@@ -91,63 +123,81 @@ LibreTTS 支持添加自定义 API 端点，目前支持两种格式：
 
 2. 登录 [Vercel](https://vercel.com/)，点击 "New Project"
 
-3. 导入你 fork 的仓库，并选择默认设置部署即可
+3. 导入你 fork 的仓库，Vercel 会自动识别 Next.js 项目并选择默认设置部署
 
 4. 部署完成后，你会获得一个 `your-project.vercel.app` 的域名
 
-### Cloudflare Pages 部署
-
-1. Fork 本仓库到你的 GitHub 账号
-
-2. 登录 Cloudflare Dashboard，进入 Pages 页面
-
-3. 创建新项目，选择从 Git 导入：
-   - 选择你 fork 的仓库
-   - 构建设置：
-     - 构建命令：留空
-     - 输出目录：`/`
-     - 环境变量：无需设置
-
-4. 部署完成后，你会获得一个 `xxx.pages.dev` 的域名
-
 ### 服务器部署（Docker）
 
-适合部署在自己的 VPS / 家用服务器上。项目服务端零依赖，镜像体积很小。
+官方镜像已发布到 GitHub Container Registry，同时支持 amd64 / arm64 架构：
+
+| 镜像 | 说明 |
+| --- | --- |
+| `ghcr.io/librespark/libretts` | 上游官方镜像 |
+| `ghcr.io/bestzwei/libretts` | 本仓库镜像（内容相同） |
+
+可用标签：`latest`（main 分支最新构建）、`v1.0.1`（版本标签）、`1.0`（主次版本）、git 提交哈希。镜像在每次推送到 `main` 分支或发布 `v*` 标签时由 GitHub Actions 自动构建。
+
+#### 方式一：docker run
 
 ```bash
-git clone https://github.com/LibreSpark/LibreTTS.git
-cd LibreTTS
+docker run -d   -p 3000:3000   -e PASSWORD=你的密码   --restart unless-stopped   --name libretts   ghcr.io/librespark/libretts:latest
+```
 
-# 可选：启用访问密码
-echo "PASSWORD=你的密码" > .env
+`PASSWORD` 可省略（不启用访问密码）；修改 `-p` 前面的端口可更换服务端口。
 
+#### 方式二：Docker Compose
+
+新建 `docker-compose.yml`（无需 clone 仓库）：
+
+```yaml
+services:
+  libretts:
+    image: ghcr.io/librespark/libretts:latest
+    container_name: libretts
+    ports:
+      - "3000:3000"
+    environment:
+      # 设置访问密码；留空则不启用验证
+      - PASSWORD=${PASSWORD:-}
+    restart: unless-stopped
+```
+
+启动：
+
+```bash
 docker compose up -d
 ```
 
-服务将运行在 `http://服务器IP:3000`，可用 `-p` 修改映射端口（在 `docker-compose.yml` 中）。
-
-不想用 Docker Compose 也可以直接：
+常用命令：
 
 ```bash
-docker build -t libretts .
-docker run -d -p 3000:3000 -e PASSWORD=你的密码 --restart unless-stopped --name libretts libretts
+docker compose logs -f        # 查看日志
+docker compose pull && docker compose up -d   # 更新到最新镜像
+docker compose down           # 停止并移除容器
 ```
+
+如果 clone 了本仓库，`docker-compose.yml` 已内置（含 `build: .`），本地修改过代码时可用 `docker compose build` 构建自己的版本。
+
+服务将运行在 `http://服务器IP:3000`。
 
 ### 服务器部署（Node.js）
 
-要求 Node.js 20 或更高版本，无需安装任何 npm 依赖：
+要求 Node.js 20 或更高版本：
 
 ```bash
 git clone https://github.com/LibreSpark/LibreTTS.git
 cd LibreTTS
+npm install
+npm run build
 
 # 可选：启用访问密码
 export PASSWORD=你的密码
 
-node server/server.js          # 或 npm start
+npm start
 ```
 
-可用环境变量：`PORT`（默认 3000）、`HOST`（默认 0.0.0.0）、`PASSWORD`（可选）。
+可用环境变量：`PORT`（默认 3000）、`HOSTNAME`（默认 0.0.0.0）、`PASSWORD`（可选）。
 
 如需开机自启，可配置 systemd 服务（`/etc/systemd/system/libretts.service`）：
 
@@ -159,7 +209,8 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/LibreTTS
 Environment=PASSWORD=你的密码
-ExecStart=/usr/bin/node server/server.js
+Environment=PORT=3000
+ExecStart=/usr/bin/npm start
 Restart=unless-stopped
 
 [Install]
@@ -189,6 +240,20 @@ server {
 
 ## 环境变量
 
-除了原有配置外，现在项目支持设置环境变量 PASSWORD 来开启访问密码验证。如果 PASSWORD 非空，则用户第一次访问页面时会显示密码输入界面，输入正确后在该设备上后续访问将不再需要验证。
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `PASSWORD` | 访问密码，非空时开启验证 | 空（不验证） |
+| `PORT` | 服务监听端口 | `3000` |
+| `HOSTNAME` | 服务监听地址 | `0.0.0.0` |
+
+设置 `PASSWORD` 后，用户第一次访问页面时会显示密码输入界面，输入正确后在该设备上后续访问将不再需要验证。
+
+### 关于 Cloudflare 部署
+
+旧版本曾支持 Cloudflare Pages，Next.js 重构后暂不直接支持。项目 API 层仅使用 Web 标准 API，如需部署到 Cloudflare Workers 可基于 [OpenNext Cloudflare 适配器](https://opennext.js.org/cloudflare) 自行配置。
+
+## 许可证
+
+[MIT](LICENSE)
 
 [![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
